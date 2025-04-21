@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Enhanced Web GIS Application</title>
+
+  <!-- CSS Libraries -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/ol@latest/ol.css" rel="stylesheet" />
+
+  <style>
+    html, body { height:100%; margin:0; }
+    #app-container { display:flex; height:calc(100% - 56px); }
+    #sidebar      { width:320px; background:#f8f9fa; border-right:1px solid #dee2e6;
+                    padding:20px; overflow-y:auto; }
+    #map          { flex:1; }
+    #popup { position:absolute; min-width:200px; background:#fff; border:1px solid #ccc;
+             box-shadow:2px 2px 4px rgba(0,0,0,.3); padding:8px; display:none; z-index:10; }
+    .progress { height:20px; }
+    #dropZone { border:2px dashed #bbb; border-radius:4px;
+                padding:20px; text-align:center; cursor:pointer; }
+    #dropZone.hover { border-color:#007bff; background:#e9f5ff; }
+  </style>
+</head>
+<body class="bg-light">
+
+  <!-- Navbar -->
+  <nav class="navbar navbar-dark bg-dark px-3">
+    <span class="navbar-brand">Web GIS Application</span>
+    <button id="themeToggle" class="btn btn-outline-light btn-sm">
+      <i class="fas fa-moon"></i> Dark Mode
+    </button>
+  </nav>
+
+  <div id="app-container">
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <h5 class="mb-2"><i class="fas fa-upload"></i> Upload Data</h5>
+      <div id="dropZone">Drag & Drop or Click to Browse</div>
+      <form id="uploadForm" class="mt-2" enctype="multipart/form-data">
+        <input type="file" id="data_file" name="data_file" hidden />
+      </form>
+      <div id="uploadProgress" class="progress my-3" style="display:none;">
+        <div class="progress-bar" role="progressbar" style="width:0%">0%</div>
+      </div>
+      <div id="uploadStatus" class="mb-3"></div>
+
+      <h5><i class="fas fa-layer-group"></i> Layers</h5>
+      <div id="layerControl" class="mb-3"></div>
+
+      <h5 class="mt-3"><i class="fas fa-search-location"></i> Search</h5>
+      <div class="input-group mb-3">
+        <input id="searchInput" class="form-control" placeholder="Search location" />
+        <button id="searchBtn" class="btn btn-outline-secondary"><i class="fas fa-search"></i></button>
+      </div>
+
+      <h5><i class="fas fa-pencil-alt"></i> Drawing Tools</h5>
+      <button id="enableDraw"    class="btn btn-secondary btn-sm mb-1"><i class="fas fa-edit"></i> Enable Draw</button>
+      <button id="clearDraw"     class="btn btn-secondary btn-sm mb-3"><i class="fas fa-eraser"></i> Clear</button>
+      <button id="measureDistBtn" class="btn btn-info btn-sm mb-1">Measure Dist.</button>
+      <button id="measureAreaBtn" class="btn btn-info btn-sm mb-1">Measure Area</button>
+      <button id="clearMeasureBtn" class="btn btn-warning btn-sm mb-3">Clear Meas.</button>
+
+      <div id="tableArea" style="display:none;">
+        <h5><i class="fas fa-table"></i> Data Table</h5>
+        <div id="dataTable"></div>
+        <div id="colSelectors" class="mt-2"></div>
+      </div>
+
+      <a href="/reset" class="btn btn-danger btn-sm w-100 mt-3"><i class="fas fa-redo"></i> Reset</a>
+    </div>
+
+    <!-- Map Container -->
+    <div id="map"></div>
+  </div>
+
+  <!-- Popup Overlay -->
+  <div id="popup"><div id="popup-content"></div></div>
+
+  <!-- JS Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ol@latest/dist/ol.js"></script>
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+
+  <script>
+    // Globals
+    let map, drawInteraction, measureInteraction;
+    const drawnSource   = new ol.source.Vector();
+    const measureSource = new ol.source.Vector();
+    const uploadedLayers = {};
+
+    // Initialize map after DOM is ready
+    function initMap() {
+      const osmLayer = new ol.layer.Tile({ source: new ol.source.OSM(), title:'OSM' });
+      const satLayer = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+        }), title:'Satellite', visible:false
+      });
+      const drawLayer = new ol.layer.Vector({ source:drawnSource, style: new ol.style.Style({
+        image: new ol.style.Circle({ radius:6, fill:new ol.style.Fill({color:'red'}), stroke:new ol.style.Stroke({color:'black',width:1})}),
+        stroke: new ol.style.Stroke({color:'red', width:2})
+      }), title:'Drawings' });
+      const measLayer = new ol.layer.Vector({ source:measureSource, style: new ol.style.Style({
+        stroke:new ol.style.Stroke({color:'red', width:2}), fill:new ol.style.Fill({color:'rgba(255,0,0,0.15)'})
+      }), title:'Measurements' });
+
+      map = new ol.Map({
+        target:'map', layers:[osmLayer, satLayer, drawLayer, measLayer],
+        view: new ol.View({ center: ol.proj.fromLonLat([0,0]), zoom:2 })
+      });
+
+      // Popup overlay
+      const popupEl = document.getElementById('popup');
+      const popupOverlay = new ol.Overlay({ element:popupEl, autoPan:true, autoPanAnimation:{duration:250} });
+      map.addOverlay(popupOverlay);
+      map.on('singleclick', evt => {
+        popupEl.style.display='none';
+        map.forEachFeatureAtPixel(evt.pixel, f => {
+          const props = f.getProperties();
+          const html = Object.keys(props)
+            .filter(k=>k!=='geometry')
+            .map(k=>`<b>${k}</b>: ${props[k]}`)
+            .join('<br>');
+          document.getElementById('popup-content').innerHTML = html;
+          popupOverlay.setPosition(evt.coordinate);
+          popupEl.style.display='block';
+        });
+      });
+    }
+    document.addEventListener('DOMContentLoaded', initMap);
+
+    // Layer control UI
+    function updateLayerControl() {
+      const ctrl = document.getElementById('layerControl'); ctrl.innerHTML = '';
+      Object.entries(uploadedLayers).forEach(([name, obj]) => {
+        const div = document.createElement('div'); div.className='d-flex align-items-center mb-1';
+        const chk = document.createElement('input'); chk.type='checkbox'; chk.checked=true; chk.className='form-check-input me-1';
+        chk.onchange = () => obj.layer.setVisible(chk.checked);
+        const swatch = document.createElement('span');
+        swatch.style=`display:inline-block;width:16px;height:16px;margin:0 6px 0 0;background:${obj.color};border:1px solid #000`;
+        const lbl = document.createElement('span'); lbl.textContent=name;
+        const btnZoom = document.createElement('button'); btnZoom.textContent='Zoom'; btnZoom.className='btn btn-sm btn-outline-primary ms-1';
+        btnZoom.onclick = ()=>{ map.getView().fit(obj.layer.getSource().getExtent(), {padding:[50,50,50,50],duration:800}); };
+        const btnRemove = document.createElement('button'); btnRemove.textContent='Remove'; btnRemove.className='btn btn-sm btn-outline-danger ms-1';
+        btnRemove.onclick = ()=>{ map.removeLayer(obj.layer); delete uploadedLayers[name]; updateLayerControl(); };
+        div.append(chk, swatch, lbl, btnZoom, btnRemove); ctrl.appendChild(div);
+      });
+    }
+
+    // Add GeoJSON layer
+    function addGeoLayer(name, gjStr) {
+      const gj = JSON.parse(gjStr);
+      const format = new ol.format.GeoJSON();
+      const features = format.readFeatures(gj, { dataProjection:'EPSG:4326', featureProjection:'EPSG:3857' });
+      const color = '#'+Math.floor(Math.random()*16777215).toString(16).padStart(6,'0');
+      const layer = new ol.layer.Vector({
+        source: new ol.source.Vector({features}),
+        style: new ol.style.Style({
+          fill:new ol.style.Fill({color:color+'55'}),
+          stroke:new ol.style.Stroke({color:color, width:2}),
+          image:new ol.style.Circle({radius:5, fill:new ol.style.Fill({color:color}), stroke:new ol.style.Stroke({color:'#fff',width:1})})
+        }), title:name
+      });
+      map.addLayer(layer);
+      uploadedLayers[name] = { layer, color };
+      updateLayerControl();
+      map.getView().fit(layer.getSource().getExtent(), {padding:[50,50,50,50], duration:800});
+    }
+
+    // File upload (drag/drop or browse)
+    const dropZone = document.getElementById('dropZone'), fileInput = document.getElementById('data_file');
+    dropZone.addEventListener('click', ()=>fileInput.click());
+    fileInput.addEventListener('change', ()=>uploadFiles(fileInput.files));
+    ['dragover','dragleave','drop'].forEach(evt=> dropZone.addEventListener(evt, e=>{
+      e.preventDefault();
+      if(evt==='dragover') dropZone.classList.add('hover');
+      if(evt==='dragleave'||evt==='drop') dropZone.classList.remove('hover');
+      if(evt==='drop') uploadFiles(e.dataTransfer.files);
+    }));
+    function uploadFiles(files) {
+      if(!files.length) return;
+      const file = files[0];
+      if(file.size > 10*1024*1024 && !confirm('File >10MB, may be slow. Continue?')) return;
+      const fd = new FormData(); fd.append('data_file', file);
+      const xhr = new XMLHttpRequest(); xhr.open('POST','/api/upload');
+      xhr.upload.onprogress = ev=>{
+        const pct=Math.round(100*ev.loaded/ev.total);
+        document.getElementById('uploadProgress').style.display='block';
+        document.querySelector('#uploadProgress .progress-bar').style.width=pct+'%';
+        document.querySelector('#uploadProgress .progress-bar').textContent=pct+'%';
+      };
+      xhr.onload = ()=>{
+        document.getElementById('uploadProgress').style.display='none';
+        const res=JSON.parse(xhr.responseText);
+        document.getElementById('uploadStatus').innerHTML = res.error
+          ? `<div class="alert alert-danger">${res.error}</div>`
+          : `<div class="alert alert-success">${res.message}</div>`;
+        if(res.type==='map') addGeoLayer(res.layer, JSON.stringify(res.geojson));
+        if(res.type==='table') renderTable(res.columns, res.preview);
+      };
+      xhr.send(fd);
+    }
+
+    // Render table & lat/lon selectors
+    function renderTable(cols, rows) {
+      let tbl=`<table class="table table-sm table-bordered"><thead><tr>`;
+      cols.forEach(c=>tbl+=`<th>${c}</th>`);
+      tbl+='</tr></thead><tbody>';
+      rows.forEach(r=>{ tbl+='<tr>'; cols.forEach(c=>tbl+=`<td>${r[c]||''}</td>`); tbl+='</tr>'; });
+      tbl+='</tbody></table>';
+      document.getElementById('dataTable').innerHTML=tbl;
+      document.getElementById('tableArea').style.display='block';
+
+      // selectors
+      const opts=cols.map(c=>`<option value="${c}">${c}</option>`).join('');
+      document.getElementById('colSelectors').innerHTML=`
+        <label class="form-label mt-2 mb-1">Latitude column</label>
+        <select id="latSelect" class="form-select form-select-sm mb-2">${opts}</select>
+        <label class="form-label mb-1">Longitude column</label>
+        <select id="lonSelect" class="form-select form-select-sm mb-2">${opts}</select>
+        <button id="plotTableBtn" class="btn btn-success btn-sm w-100">Plot points</button>
+      `;
+      document.getElementById('plotTableBtn').onclick = ()=>{
+        const lat=document.getElementById('latSelect').value;
+        const lon=document.getElementById('lonSelect').value;
+        fetch('/api/plot_table',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat_col:lat, lon_col:lon})})
+          .then(r=>r.json()).then(res=>{
+            if(res.error) return alert(res.error);
+            addGeoLayer(res.layer, JSON.stringify(res.geojson));
+            document.getElementById('uploadStatus').innerHTML = `<div class="alert alert-success">${res.message}</div>`;
+          });
+      };
+    }
+
+    // Search Nominatim
+    document.getElementById('searchBtn').onclick = ()=>{
+      const q=document.getElementById('searchInput').value;
+      if(!q) return;
+      fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}`)
+        .then(r=>r.json()).then(d=>{
+          if(!d.length) return;
+          const {lat, lon} = d[0];
+          map.getView().animate({ center: ol.proj.fromLonLat([+lon,+lat]), zoom:12, duration:1000 });
+        });
+    };
+
+    // Drawing & Measuring (unchanged)…
+    document.getElementById('enableDraw').onclick = ()=>{
+      if(drawInteraction) return;
+      drawInteraction = new ol.interaction.Draw({ source:drawnSource, type:'Point' });
+      map.addInteraction(drawInteraction);
+      document.getElementById('enableDraw').disabled=true;
+    };
+    document.getElementById('clearDraw').onclick = ()=>{
+      if(drawInteraction){ map.removeInteraction(drawInteraction); drawInteraction=null; document.getElementById('enableDraw').disabled=false; }
+      drawnSource.clear();
+    };
+    function addMeasure(type){
+      if(measureInteraction) map.removeInteraction(measureInteraction);
+      measureInteraction=new ol.interaction.Draw({ source:measureSource, type });
+      map.addInteraction(measureInteraction);
+      measureInteraction.on('drawend', ev => {
+        const geom=ev.feature.getGeometry();
+        const output = type==='LineString'
+          ? `Distance: ${(ol.sphere.getLength(geom)/1000).toFixed(2)} km`
+          : `Area: ${(ol.sphere.getArea(geom)/1e6).toFixed(2)} km²`;
+        alert(output);
+      });
+    }
+    document.getElementById('measureDistBtn').onclick = ()=>addMeasure('LineString');
+    document.getElementById('measureAreaBtn').onclick= ()=>addMeasure('Polygon');
+    document.getElementById('clearMeasureBtn').onclick= ()=>{ if(measureInteraction){ map.removeInteraction(measureInteraction); measureInteraction=null;} measureSource.clear(); };
+
+    // Load existing markers
+    fetch('/api/markers').then(r=>r.json()).then(gj=>{
+      const feats = new ol.format.GeoJSON().readFeatures(gj, {dataProjection:'EPSG:4326',featureProjection:'EPSG:3857'});
+      const src   = new ol.source.Vector({features:feats});
+      map.addLayer(new ol.layer.Vector({ source:src,
+        style:new ol.style.Style({ image:new ol.style.Icon({anchor:[0.5,1],src:'https://openlayers.org/en/latest/examples/data/icon.png'}) })
+      }));
+    });
+
+    // Theme toggle
+    document.getElementById('themeToggle').onclick = function(){
+      document.body.classList.toggle('bg-dark'); document.body.classList.toggle('text-light');
+      const ic = this.querySelector('i');
+      if(ic.classList.contains('fa-moon')){
+        ic.classList.replace('fa-moon','fa-sun'); this.innerHTML='<i class="fas fa-sun"></i> Light Mode';
+      } else {
+        ic.classList.replace('fa-sun','fa-moon'); this.innerHTML='<i class="fas fa-moon"></i> Dark Mode';
+      }
+    };
+  </script>
+</body>
+</html>
