@@ -1,0 +1,10 @@
+flask
+geopandas
+folium
+pandas
+gunicorn
+Fiona
+json
+shutil
+zipfile
+secrets
